@@ -37,3 +37,7 @@ export const uploadOnCloudinary = async (localLink: string): Promise<{ url?: str
         return { error: "An error occurred during the upload" };
     }
 };
+
+
+
+

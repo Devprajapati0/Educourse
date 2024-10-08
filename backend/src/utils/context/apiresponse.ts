@@ -4,7 +4,7 @@ class apiResponse{
     public data: any;
     public success :boolean;
 
-     constructor(statuscode :number,data : any,message:string="success"){
+     constructor(statuscode :number,data : any,message:string=""){
         this.statuscode = statuscode
         this.data = data
         this.message = message
