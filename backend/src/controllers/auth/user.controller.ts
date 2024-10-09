@@ -6,10 +6,12 @@ import { PrismaClient } from "@prisma/client";
 import { roleType } from "@prisma/client";
 import { uploadOnCloudinary } from "../../utils/storage/cloudinary";
 import brcypt from "bcryptjs"
-import jwt from "jsonwebtoken"
+import jwt, { JwtPayload } from "jsonwebtoken"
 import dotenv from "dotenv"
 import { loginSchema } from '../../utils/schemas/login.schemas';
 import { authentication } from '../../middlewares/auth.middleware';
+import { emailSchema, otpSchema } from '../../utils/schemas/otp.schemas';
+import { sendForgotPasswordEmail } from '../../utils/helpers/sendemail';
 dotenv.config();
 
 const prisma = new PrismaClient();
@@ -261,14 +263,360 @@ const logout = asynhandler(async (req :authentication ,resp :Response,next: Next
     try {
     const id = await req.user?.id;
 
-    const user
+    const user = await prisma.user.findUnique({
+        where: {
+            id: id
+        }
+    })
+    
+    if(!user){
+        return resp.status(404).json(
+            new apiResponse(404," ", "User not found.")
+            );
+    }
+    
+    const options = {
+        httpOnly:true,
+        secure: true
+
+    }
+
+    return resp.status(200)
+        .clearCookie("accessToken",options)
+        .clearCookie("refreshToken",options)
+        .json(
+            new apiResponse(
+                200,
+                "",
+                "userlogout successfully"
+
+            )
+        )
+
+
     } catch (error) {
-        
+        return resp.status(500).json( // Change status to 500 (Conflict) for better semantics
+            new apiResponse(500," ", "Internal server error.")
+        );
     }
 })
 
+const refreshTokenRegenerate = asynhandler (async (req : Request ,resp : Response , next: NextFunction) => {
+    try {
+        const token = req.cookies?.refreshToken || req.body.refreshToken;
+        console.log("token:", token);
+
+        if (!token) {
+            return resp.status(401).json(
+                new apiResponse(401, "Invalid refresh token", "Refresh token is missing or invalid.")
+            );
+        }
+
+        const decodedToken = jwt.verify(token, process.env.REFRESH_TOKEN_SECRET!) as JwtPayload;
+
+        if (!decodedToken || !decodedToken._id) {
+            return resp.status(403).json(
+                new apiResponse(403, "Invalid token", "Token verification failed.")
+            );
+        }
+
+        const user = await prisma.user.findUnique({
+            where: {
+                id: decodedToken._id,
+            }
+        });
+
+        if (!user) {
+            return resp.status(404).json(
+                new apiResponse(404, "User not found", "User associated with the token was not found.")
+            );
+        }
+        
+
+        const accessToken = jwt.sign(
+            {
+                _id: user.id, 
+                username: user.username, 
+                email: user.email, 
+                role: user.role
+            },
+            process.env.ACCESS_TOKEN_SECRET!,
+            {
+                expiresIn: process.env.ACCESS_TOKEN_EXPIRY,
+            }
+        );
+        
+        // Generate refresh token
+        const refreshToken = jwt.sign(
+            {
+                _id: user.id, 
+            },
+            process.env.REFRESH_TOKEN_SECRET!,
+            {
+                expiresIn: process.env.REFRESH_TOKEN_EXPIRY,
+            }
+        );
+
+        console.log("accessToken",accessToken)
+        console.log("refreshToken",refreshToken)
+
+        const options = {
+            httpOnly: true,
+            secure : true
+         }
+
+         return resp.status(201)
+         .cookie("accessToken",accessToken,options)
+         .cookie("refreshToken",refreshToken,options)
+         .json(
+             new apiResponse(200, user,"User login successfully.")
+         );
+
+    } catch (error) {
+        console.error(error); // Log error for debugging purposes
+        return resp.status(500).json(
+            new apiResponse(500, "Internal server error", "Something went wrong while processing your request.")
+        );
+    }
+})
+
+const getCurrentUser = asynhandler(async (req:authentication , resp:Response , next : NextFunction) => {
+    return resp.json(
+        new apiResponse(200, req.user,"user details.")
+    )
+})
+
+const forgotPassword = asynhandler(async (req: Request, resp: Response, next: NextFunction) => {
+ 
+    const forgotEmail = emailSchema.safeParse(req.body);
+
+    if (!forgotEmail.success) {
+    
+        const errorMessages = forgotEmail.error.errors.map(err => ({
+            field: err.path.join('.'), 
+            message: err.message,       
+        }));
+
+        const formattedErrorMessages = errorMessages.map(err => `${err.field}: ${err.message}`).join('; ');
+    
+        return resp.status(400).json(
+            new apiResponse(400, "Validation failed", formattedErrorMessages)
+        );
+    }
+
+    const userExistedWithThisEmail = await prisma.user.findUnique({
+        where: { email: forgotEmail.data.email }
+    });
+
+    if (!userExistedWithThisEmail) {
+        return resp.status(404).json(
+            new apiResponse(404, "User not found", "User with this email does not exist")
+        );
+    }
+
+    // Generate a 6-digit verification code
+    const verifyCode = Math.floor(100000 + Math.random() * 900000).toString();
+    const expiryDate = new Date();
+    expiryDate.setMinutes(expiryDate.getMinutes() + 1);
+    
+
+    // Create OTP model with the verification code
+    const otpModelCreated = await prisma.otp.create({
+        data: {
+            email: userExistedWithThisEmail.email,
+            otp: verifyCode,
+            otpexpiry: expiryDate
+        }
+    });
+
+    // Send the password reset email
+    const emailSender = await sendForgotPasswordEmail(
+        userExistedWithThisEmail.username,
+        userExistedWithThisEmail.email,
+        verifyCode
+    );
+
+    if (!emailSender) {
+        return resp.status(500).json(
+            new apiResponse(500, "Failed to send email", "Failed to send email to the user")
+        );
+    }
+
+    if (!otpModelCreated) {
+        return resp.status(500).json(
+            new apiResponse(500, "Internal server error", "Failed to create OTP model")
+        );
+    }
+
+    return resp.status(200).json(
+        new apiResponse(200, "OTP sent", "Verification code sent to your email")
+    );
+});
+
+const verifyCode = asynhandler(async (req: Request, resp: Response, next: NextFunction) => {
+    try {
+       
+        const verify = otpSchema.safeParse(req.body);
+        if (!verify.success) {
+            // Extract and format validation error messages
+            const errorMessages = verify.error.errors.map(err => ({
+                field: err.path.join('.'),
+                message: err.message,
+            }));
+
+            const formattedErrorMessages = errorMessages.map(err => `${err.field}: ${err.message}`).join('; ');
+
+            return resp.status(400).json(
+                new apiResponse(400, "Validation failed", formattedErrorMessages)
+            );
+        }
+
+      
+        verify.data.email = verify.data.email + "@gmail.com";
+
+        const userExistedWithThisEmail = await prisma.user.findUnique({
+            where: {
+                email: verify.data.email
+            }
+        });
+
+        if (!userExistedWithThisEmail) {
+            return resp.status(404).json(
+                new apiResponse(404, "User not found", "User with this email does not exist")
+            );
+        }
+
+        const otpModelOfEmail = await prisma.otp.findUnique({
+            where: {
+                email: verify.data.email
+            }
+        });
+
+        if (!otpModelOfEmail) {
+            return resp.status(404).json(
+                new apiResponse(404, "OTP not found", "No OTP found for this email")
+            );
+        }
+
+        const isCodeValid = otpModelOfEmail.otp === verify.data.otp;
+        const isCodeNotExpired = new Date(otpModelOfEmail.otpexpiry) > new Date();
+
+        if (isCodeNotExpired && isCodeValid) {
+           
+            const passUpdated = await prisma.user.update({
+                where: {
+                    email: verify.data.email
+                },
+                data: {
+                    password: verify.data.newpassword
+                }
+            });
+
+            if (!passUpdated) {
+                return resp.status(500).json(
+                    new apiResponse(500, "Failed to update password", "Failed to update password")
+                );
+            }
+
+            return resp.status(200).json(
+                new apiResponse(200, "Password updated successfully", "Password updated successfully")
+            );
+        } else if (!isCodeNotExpired) {
+            return resp.status(400).json({
+                success: false,
+                message: "Code expired",
+            });
+        } else {
+            return resp.status(400).json({
+                success: false,
+                message: "Code is invalid",
+            });
+        }
+    } catch (error) {
+        return resp.status(500).json(
+            new apiResponse(500, "Internal server error", "An error occurred while processing your request.")
+        );
+    }
+});
+
+const resendCode = asynhandler(async (req: Request, resp: Response, next: NextFunction) => {
+    try {
+        const { email } = req.body;
+
+        if (!email) {
+            return resp.status(400).json(
+                new apiResponse(400, "Please provide the email", "Missing required email field")
+            );
+        }
+
+        const emailWithDomain = `${email}@gmail.com`;
+
+        const userExistedWithThisEmail = await prisma.user.findUnique({
+            where: {
+                email: emailWithDomain
+            }
+        });
+
+        if (!userExistedWithThisEmail) {
+            return resp.status(404).json(
+                new apiResponse(404, "User not found", "User with this email does not exist")
+            );
+        }
+
+        const verifyCode = Math.floor(100000 + Math.random() * 900000).toString();
+        const expiryDate = new Date();
+        expiryDate.setMinutes(expiryDate.getMinutes() + 1);  // Set expiry to 1 minute from now
+
+        // Update OTP model with the new verification code and expiry
+        const otpModelUpdated = await prisma.otp.update({
+            where: {
+                email: userExistedWithThisEmail.email
+            },
+            data: {
+                otp: verifyCode,
+                otpexpiry: expiryDate
+            }
+        });
+    
+        if (!otpModelUpdated) {
+            return resp.status(500).json(
+                new apiResponse(500, "Internal server error", "Failed to update OTP model")
+            );
+        }
+
+        // Send the password reset email with the new verification code
+        const emailSender = await sendForgotPasswordEmail(
+            userExistedWithThisEmail.username,
+            userExistedWithThisEmail.email,
+            verifyCode
+        );
+    
+        if (!emailSender) {
+            return resp.status(500).json(
+                new apiResponse(500, "Failed to send email", "Failed to send email to the user")
+            );
+        }
+        
+        return resp.status(200).json(
+            new apiResponse(200, "OTP sent", "Verification code sent to your email")
+        );
+
+    } catch (error) {
+        return resp.status(500).json(
+            new apiResponse(500, "Internal server error", error.message || "Something went wrong")
+        );
+    }
+});
 
 
 export  {register , 
-    login
+    login,
+    logout,
+    refreshTokenRegenerate,
+    getCurrentUser,
+    forgotPassword,
+    verifyCode,
+    resendCode,
+    
+
 }

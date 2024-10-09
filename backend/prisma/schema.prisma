@@ -25,6 +25,13 @@ model User{
 
 }
 
+model otp{
+   email String @unique
+   otp String @unique
+   otpexpiry DateTime @default(now())
+   createdAt DateTime @default(now())
+}
+
 enum roleType {
   student
   instructor
