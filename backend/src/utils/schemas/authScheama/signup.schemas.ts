@@ -23,5 +23,9 @@ export const signupSchema = z.object({
         role: z
         .enum(['student', 'instructor'], { 
             errorMap: () => ({ message: 'Role must be either student or instructor' }) 
-        })
+        }),
+    description: z.string()
+        .min(10, { message: 'description must be at least 10 characters long' })
+        .max(50, { message: 'description must be at most 50 characters long' })  
+                    
 });

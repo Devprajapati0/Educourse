@@ -14,6 +14,7 @@ model User{
   id Int @id @default(autoincrement())
   email String @unique
   username String 
+  description String?
   photo String @default("https://www.google.co.in/imgres?q=avatar%20for%20progile&imgurl=https%3A%2F%2Fstatic.vecteezy.com%2Fsystem%2Fresources%2Fpreviews%2F014%2F212%2F681%2Foriginal%2Ffemale-user-profile-avatar-is-a-woman-a-character-for-a-screen-saver-with-emotions-for-website-and-mobile-app-design-illustration-on-a-white-isolated-background-vector.jpg&imgrefurl=https%3A%2F%2Fwww.vecteezy.com%2Fvector-art%2F14212681-female-user-profile-avatar-is-a-woman-a-character-for-a-screen-saver-with-emotions-for-website-and-mobile-app-design-vector-illustration-on-a-white-isolated-background&docid=PLuN01VZotFH4M&tbnid=lsrv_IqhsJhCDM&vet=12ahUKEwjGxuPEu_yIAxWnVWwGHTHmGJ4QM3oECH0QAA..i&w=1920&h=1920&hcb=2&ved=2ahUKEwjGxuPEu_yIAxWnVWwGHTHmGJ4QM3oECH0QAA")
   password String 
   role roleType @default(student)

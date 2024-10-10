@@ -1,17 +1,18 @@
 import { Request, Response, NextFunction } from 'express';
 import asynhandler from "../../utils/context/asynchandler";
 import apiResponse from "../../utils/context/apiresponse";
-import { signupSchema } from "../../utils/schemas/signup.schemas";
+import { loginSchema } from '../../utils/schemas/authScheama/login.schemas';
+import { signupSchema } from '../../utils/schemas/authScheama/signup.schemas';
+import { emailSchema,otpSchema } from '../../utils/schemas/authScheama/otp.schemas';
 import { PrismaClient } from "@prisma/client";
 import { roleType } from "@prisma/client";
 import { uploadOnCloudinary } from "../../utils/storage/cloudinary";
 import brcypt from "bcryptjs"
 import jwt, { JwtPayload } from "jsonwebtoken"
 import dotenv from "dotenv"
-import { loginSchema } from '../../utils/schemas/login.schemas';
 import { authentication } from '../../middlewares/auth.middleware';
-import { emailSchema, otpSchema } from '../../utils/schemas/otp.schemas';
-import { sendForgotPasswordEmail } from '../../utils/helpers/sendemail';
+import { sendForgotPasswordEmail } from '../../utils/helpers/sendForgotPasswordEmail';
+import { updateSchema } from '../../utils/schemas/authScheama/update.schemas';
 dotenv.config();
 
 const prisma = new PrismaClient();
@@ -87,7 +88,8 @@ const register = asynhandler(async (req: Request, resp: Response, next: NextFunc
                 username: data.username,
                 password: hashedPassword,
                 accesstoken:'',
-                refreshtoken:''
+                refreshtoken:'',
+                description:data.description
             }, 
         });
 
@@ -601,12 +603,86 @@ const resendCode = asynhandler(async (req: Request, resp: Response, next: NextFu
             new apiResponse(200, "OTP sent", "Verification code sent to your email")
         );
 
-    } catch (error) {
+    } catch (error:any) {
         return resp.status(500).json(
             new apiResponse(500, "Internal server error", error.message || "Something went wrong")
         );
     }
 });
+
+const updateProfile = asynhandler(async (req: authentication, resp: Response, next: NextFunction) => {
+    try {
+        // Validate request data using the schema
+        const updatedData = updateSchema.safeParse(req.body);
+
+        if (!updatedData.success) {
+            // Format validation error messages
+            const errorMessages = updatedData.error.errors.map(err => ({
+                field: err.path.join('.'),
+                message: err.message,
+            }));
+
+            const formattedErrorMessages = errorMessages.map(err => `${err.field}: ${err.message}`).join('; ');
+
+            return resp.status(400).json(
+                new apiResponse(400, "Validation failed", formattedErrorMessages)
+            );
+        }
+
+        // Check if the user exists based on the email from the authenticated session
+        const userExisted = await prisma.user.findUnique({
+            where: { email: req.user?.email }
+        });
+
+        if (!userExisted) {
+            return resp.status(404).json(
+                new apiResponse(404, "Session Expired", "Session expired. Please log in again.")
+            );
+        }
+
+        const data = updatedData.data;
+
+        // If a new profile photo is uploaded, use the new one; otherwise, keep the old one
+        const profilePhoto = req.file ? req.file.path : userExisted.photo;
+        const uploaded = await uploadOnCloudinary(profilePhoto); 
+
+        let hashedPassword = userExisted.password;  // Default to existing password
+
+         if (data.password && data.password.trim() !== '') {
+           hashedPassword = await brcypt.hash(data.password, 10);
+         }
+
+        // Update user details in the database
+        const updates = await prisma.user.update({
+            where: { email: req.user?.email },
+            data: {
+                username: data.username || userExisted.username,  
+                password: hashedPassword,
+                photo: uploaded?.url || userExisted.photo,  
+                description: data.description || userExisted.description
+                
+            }
+        });
+
+        if (!updates) {
+            return resp.status(400).json(
+                new apiResponse(400, "Cannot update details", "Failed to update user details.")
+            );
+        }
+
+        
+        return resp.status(200).json(
+            new apiResponse(200,updates, "Profile updated successfully")
+        );
+
+    } catch (error: any) {
+     
+        return resp.status(500).json(
+            new apiResponse(500, "Internal Server Error", error.message || "Something went wrong")
+        );
+    }
+});
+
 
 
 export  {register , 
@@ -617,6 +693,6 @@ export  {register ,
     forgotPassword,
     verifyCode,
     resendCode,
-    
+    updateProfile,
 
 }
